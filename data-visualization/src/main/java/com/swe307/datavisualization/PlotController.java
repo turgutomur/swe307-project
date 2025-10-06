@@ -9,8 +9,14 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.ResponseBody;
 
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import java.nio.file.Files;
 import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.Arrays;
+import java.util.stream.Collectors;
 
 @Controller
 public class PlotController {
@@ -18,56 +24,84 @@ public class PlotController {
     @Autowired
     private DataPointRepository repository;
 
+    // 🔄 REAL-TIME: Incremental data processing with context pool
     private int currentIndex = 0;
     private double[] data = new double[100];
-    
-    // ⚡ OPTIMIZATION: Cache MongoDB data and R script (but create Context per request)
     private String rScriptTemplate;
     private List<DataPoint> dataPoints;
+    
+    // Context pool for performance (but process data incrementally)
+    private BlockingQueue<Context> contextPool;
+    private static final int POOL_SIZE = 3;
 
     @PostConstruct
     public void init() {
         try {
-            // Load R script once at startup
+            // Load R script once
             ClassPathResource resource = new ClassPathResource("plot.R");
             rScriptTemplate = new String(Files.readAllBytes(resource.getFile().toPath()));
             
-            // Cache MongoDB data once
+            // Cache MongoDB data (but don't preprocess - use incrementally)
             dataPoints = repository.findAll();
             
-            System.out.println("✅ PlotController initialized:");
-            System.out.println("   - R script cached");
+            // Initialize Context pool for performance
+            contextPool = new ArrayBlockingQueue<>(POOL_SIZE);
+            for (int i = 0; i < POOL_SIZE; i++) {
+                Context ctx = Context.newBuilder()
+                    .allowAllAccess(true)
+                    .option("engine.WarnInterpreterOnly", "false")
+                    .build();
+                contextPool.offer(ctx);
+            }
+            
+            System.out.println("✅ PlotController REAL-TIME OPTIMIZED:");
             System.out.println("   - " + dataPoints.size() + " data points cached from MongoDB");
-            System.out.println("   - NOTE: Context created per request (GraalVM R limitation)");
+            System.out.println("   - " + POOL_SIZE + " R contexts pooled for speed");
+            System.out.println("   - Dynamic incremental plotting enabled");
             
         } catch (Exception e) {
             e.printStackTrace();
             System.err.println("❌ Initialization failed: " + e.getMessage());
         }
     }
+    
+    @PreDestroy
+    public void cleanup() {
+        if (contextPool != null) {
+            while (!contextPool.isEmpty()) {
+                Context ctx = contextPool.poll();
+                if (ctx != null) ctx.close();
+            }
+        }
+        System.out.println("✅ Context pool cleaned up");
+    }
 
     @GetMapping("/plot")
     @ResponseBody
     public String plot() {
-        // Use cached data instead of querying MongoDB every time
         if (dataPoints == null || dataPoints.isEmpty()) {
             return "<html><body><h1>No data! Import CSV first.</h1></body></html>";
         }
 
+        // Reset when all data is processed
         if (currentIndex >= dataPoints.size()) {
             currentIndex = 0;
             data = new double[100];
+            System.out.println("🔄 Resetting to start - all 100 points displayed");
         }
 
+        // Get next data point from MongoDB cache
         DataPoint currentDataPoint = dataPoints.get(currentIndex);
         Double value = currentDataPoint.getCol5();
 
         if (value == null) {
-            return "<html><body><h1>Data is null at index " + currentIndex + "</h1></body></html>";
+            value = 0.0; // Handle null values
         }
 
+        // Add new data point to array
         data[currentIndex] = value;
-
+        
+        // Create arrays for current data (growing each time)
         double[] plotData = new double[currentIndex + 1];
         int[] timeData = new int[currentIndex + 1];
         
@@ -77,8 +111,13 @@ public class PlotController {
         }
 
         currentIndex++;
-
+        
+        // Generate fresh plot with current data
+        long startTime = System.currentTimeMillis();
         String svgPlot = generatePlotWithR(plotData, timeData);
+        long endTime = System.currentTimeMillis();
+        
+        System.out.println("📊 Generated plot with " + plotData.length + " points in " + (endTime - startTime) + "ms");
         
         return buildHtmlPage(svgPlot, currentIndex);
     }
@@ -86,28 +125,21 @@ public class PlotController {
     private String generatePlotWithR(double[] data, int[] time) {
         Context polyglot = null;
         try {
-            // Create new Context per request (necessary for GraalVM R stability)
-            // Cached data & R script still provide optimization!
-            polyglot = Context.newBuilder()
-                    .allowAllAccess(true)
-                    .build();
-            
-            // Create R vectors
-            StringBuilder dataStr = new StringBuilder("c(");
-            StringBuilder timeStr = new StringBuilder("c(");
-            
-            for (int i = 0; i < data.length; i++) {
-                if (i > 0) {
-                    dataStr.append(", ");
-                    timeStr.append(", ");
-                }
-                dataStr.append(data[i]);
-                timeStr.append(time[i]);
+            // Get context from pool (super fast!)
+            polyglot = contextPool.poll(1, TimeUnit.SECONDS);
+            if (polyglot == null) {
+                return "<div style='color: red;'>No context available</div>";
             }
-            dataStr.append(")");
-            timeStr.append(")");
+            
+            // Fast vector creation with streams
+            String dataStr = "c(" + Arrays.stream(data)
+                    .mapToObj(String::valueOf)
+                    .collect(Collectors.joining(", ")) + ")";
+            String timeStr = "c(" + Arrays.stream(time)
+                    .mapToObj(String::valueOf)
+                    .collect(Collectors.joining(", ")) + ")";
 
-            // Execute cached R script (no file I/O!)
+            // Execute R script
             String rCode = "data <- " + dataStr + "\n" +
                           "time <- " + timeStr + "\n" +
                           rScriptTemplate;
@@ -119,9 +151,13 @@ public class PlotController {
             e.printStackTrace();
             return "<div style='color: red;'>Error: " + e.getMessage() + "</div>";
         } finally {
-            // Clean up Context
+            // Return context to pool for reuse
             if (polyglot != null) {
-                polyglot.close();
+                try {
+                    contextPool.offer(polyglot, 1, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    polyglot.close(); // Close if can't return to pool
+                }
             }
         }
     }
@@ -150,7 +186,7 @@ public class PlotController {
             "<div class='info'>" +
             "<p>Data Points: <span class='count'>" + count + " / 100</span></p>" +
             "<p class='status'>● Auto-refreshing every 1 second</p>" +
-            "<p class='fast'>⚡ Optimized: Cached MongoDB data & R script</p>" +
+            "<p class='fast'>🔄 REAL-TIME: Adding new data point each second with Context Pool</p>" +
             "</div></div></body></html>";
     }
 }
