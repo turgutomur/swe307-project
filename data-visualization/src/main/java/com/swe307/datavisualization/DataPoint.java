@@ -10,14 +10,14 @@ public class DataPoint {
     @Id
     private String id;
     
-    @Field("Col-1")
-    private Double col1;
+    @Field("Col-5")
+    private Double col5;
 
     public DataPoint() {
     }
 
-    public DataPoint(Double col1) {
-        this.col1 = col1;
+    public DataPoint(Double col5) {
+        this.col5 = col5;
     }
 
     public String getId() {
@@ -28,19 +28,19 @@ public class DataPoint {
         this.id = id;
     }
 
-    public Double getCol1() {
-        return col1;
+    public Double getCol5() {
+        return col5;
     }
 
-    public void setCol1(Double col1) {
-        this.col1 = col1;
+    public void setCol5(Double col5) {
+        this.col5 = col5;
     }
 
     @Override
     public String toString() {
         return "DataPoint{" +
                 "id='" + id + '\'' +
-                ", col1=" + col1 +
+                ", col5=" + col5 +
                 '}';
     }
 }
