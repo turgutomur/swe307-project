@@ -83,11 +83,34 @@ public class PlotController {
             return "<html><body><h1>No data! Import CSV first.</h1></body></html>";
         }
 
-        // Reset when all data is processed
+        // Show final complete graph when all data is processed
         if (currentIndex >= dataPoints.size()) {
-            currentIndex = 0;
-            data = new double[100];
-            System.out.println("🔄 Resetting to start - all 100 points displayed");
+            // Generate final complete plot with all 100 points
+            double[] finalData = new double[dataPoints.size()];
+            int[] finalTime = new int[dataPoints.size()];
+            
+            for (int i = 0; i < dataPoints.size(); i++) {
+                Double value = dataPoints.get(i).getCol5();
+                finalData[i] = (value != null) ? value : 0.0;
+                finalTime[i] = i;
+            }
+            
+            long startTime = System.currentTimeMillis();
+            String finalSvgPlot = generatePlotWithR(finalData, finalTime);
+            long endTime = System.currentTimeMillis();
+            
+            System.out.println("🎉 Final complete plot with " + finalData.length + " points generated in " + (endTime - startTime) + "ms");
+            
+            return "<html><body style='margin: 0; padding: 20px; font-family: Arial;'>" +
+                    "<div style='text-align: center; margin-bottom: 20px;'>" +
+                    "<h1 style='color: #2E8B57; margin: 10px 0;'>🎉 Visualization Complete!</h1>" +
+                    "<h3 style='color: #666; margin: 5px 0;'>All 100 data points displayed</h3>" +
+                    "</div>" +
+                    "<div style='text-align: center;'>" + finalSvgPlot + "</div>" +
+                    "<div style='text-align: center; margin-top: 15px;'>" +
+                    "<p style='color: #999; font-size: 14px;'>Complete dataset visualization | Restart application to replay animation</p>" +
+                    "</div>" +
+                    "</body></html>";
         }
 
         // Get next data point from MongoDB cache
